@@ -1,0 +1,10 @@
+[package]
+name = "runner"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+game-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
