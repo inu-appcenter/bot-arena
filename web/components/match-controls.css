@@ -10,6 +10,12 @@ button:active:not(:disabled) { transform: translateY(1px); }
 .start:hover:not(:disabled) { background: #135d52; }
 .start:disabled { background: #dce6dd; color: #7b9183; }
 .play { font-size: 11px; }
+.playback-row { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 9px; }
+.pause, .step { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 41px; padding: 8px 5px; border: 1px solid var(--line); background: var(--page); color: var(--ink); font-size: 12px; white-space: nowrap; }
+.pause:hover:not(:disabled), .step:hover:not(:disabled) { background: #e4eddf; }
+.pause:disabled, .step:disabled { background: transparent; color: #a5afa1; }
+.pause-icon { font-size: 11px; }
+.playback-note { min-height: 30px; color: var(--muted); font-size: 10px; line-height: 1.5; margin: 10px 0 0; }
 .restart { background: transparent; border: 1px solid var(--line); color: var(--ink); margin-top: 9px; }
 .restart:hover:not(:disabled) { background: var(--page); }
 .restart:disabled { color: #b1b9ad; }

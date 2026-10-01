@@ -20,7 +20,7 @@ class MatchScoreboard extends HTMLElement {
     this.root.querySelector(".score-b").textContent = state.scores.B;
     this.root.querySelector(".turn-value").textContent = String(state.completed_turn).padStart(3, "0");
     this.root.querySelector(".turn-limit").textContent = ` / ${state.max_turns}`;
-    this.root.querySelector(".turn-note").textContent = { idle: "시작을 기다리는 중", running: "두 봇이 전략을 실행하는 중", finished: "경기 종료", failed: "실행 오류로 중단" }[snapshot.status];
+    this.root.querySelector(".turn-note").textContent = snapshot.status === "running" && snapshot.paused ? "일시정지 · 다음 턴 대기" : { idle: "시작을 기다리는 중", running: "두 봇이 전략을 실행하는 중", finished: "경기 종료", failed: "실행 오류로 중단" }[snapshot.status];
     const progress = this.root.querySelector("progress");
     progress.max = state.max_turns;
     progress.value = state.completed_turn;
