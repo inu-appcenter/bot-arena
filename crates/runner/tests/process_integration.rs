@@ -1,6 +1,6 @@
 //! Real Python subprocess checks for the local runner, including child reaping.
 use game_core::{EndReason, GameState, MAX_TURNS};
-use runner::{run_match, RunEnd, RunnerConfig};
+use runner::{playback_channel, run_match, run_match_controlled, RunEnd, RunnerConfig};
 use std::{
     fs,
     future::ready,
@@ -12,7 +12,10 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::{sync::watch, time::timeout};
+use tokio::{
+    sync::{mpsc, watch, Notify},
+    time::{timeout, Instant},
+};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -422,4 +425,331 @@ async fn pre_cancelled_match_starts_no_children() {
     assert!(paths
         .iter()
         .all(|path| !path.with_extension("pid").exists()));
+}
+
+#[tokio::test]
+async fn paused_examples_advance_exactly_one_turn_per_step_and_keep_bot_processes() {
+    let directory = TestDirectory::new();
+    let mut config = RunnerConfig::local(&root());
+    config.bot_paths = [
+        directory.example("basic_bot", "a"),
+        directory.example("strategic_bot", "b"),
+    ];
+    let paths = config.bot_paths.clone();
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let (playback, controls) = playback_channel(true);
+    let (published, mut states) = mpsc::unbounded_channel();
+    let task = tokio::spawn(run_match_controlled(
+        config,
+        cancel_rx,
+        no_delay(),
+        move |state| {
+            published.send(state).unwrap();
+            ready(())
+        },
+        controls,
+    ));
+    wait_for_markers(&paths).await;
+    let initial_pids = [pid(&paths[0]), pid(&paths[1])];
+    assert!(timeout(Duration::from_millis(100), states.recv())
+        .await
+        .is_err());
+    for expected_turn in 1..=6 {
+        timeout(Duration::from_secs(2), playback.step())
+            .await
+            .unwrap()
+            .unwrap();
+        let state = states
+            .try_recv()
+            .expect("step ack preceded its publication");
+        assert_eq!(state.completed_turn, expected_turn);
+        state.validate().unwrap();
+        assert!(timeout(Duration::from_millis(20), states.recv())
+            .await
+            .is_err());
+        assert_eq!([pid(&paths[0]), pid(&paths[1])], initial_pids);
+    }
+    cancel_tx.send(true).unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap(),
+        Ok(RunEnd::Cancelled)
+    );
+    assert!(playback.step().await.is_err());
+    for path in paths {
+        assert_reaped(&path);
+    }
+}
+
+#[tokio::test]
+async fn resume_observes_one_second_spacing_and_pause_interrupts_display_wait() {
+    let directory = TestDirectory::new();
+    let mut config = RunnerConfig::local(&root());
+    config.bot_paths = [
+        directory.example("basic_bot", "a"),
+        directory.example("strategic_bot", "b"),
+    ];
+    let paths = config.bot_paths.clone();
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let (playback, controls) = playback_channel(true);
+    let (published, mut states) = mpsc::unbounded_channel();
+    let delay = Arc::new(AtomicU64::new(1_000));
+    let task = tokio::spawn(run_match_controlled(
+        config,
+        cancel_rx,
+        delay.clone(),
+        move |state| {
+            published.send((state, Instant::now())).unwrap();
+            ready(())
+        },
+        controls,
+    ));
+    wait_for_markers(&paths).await;
+    playback.resume().await.unwrap();
+    let resumed_at = Instant::now();
+    assert!(playback.step().await.unwrap_err().contains("일시정지"));
+    let (first, first_at) = timeout(Duration::from_secs(2), states.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let (second, second_at) = timeout(Duration::from_secs(2), states.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.completed_turn, 1);
+    assert_eq!(second.completed_turn, 2);
+    assert!(first_at.duration_since(resumed_at) >= Duration::from_millis(950));
+    assert!(second_at.duration_since(first_at) >= Duration::from_millis(1_000));
+
+    delay.store(10_000, Ordering::Relaxed);
+    // A pause interrupts even a long pending display interval instead of waiting.
+    timeout(Duration::from_millis(300), playback.pause())
+        .await
+        .expect("pause waited for the display interval")
+        .unwrap();
+    playback.resume().await.unwrap();
+    timeout(Duration::from_millis(300), playback.pause())
+        .await
+        .expect("pause waited for the ten-second display interval")
+        .unwrap();
+    assert!(timeout(Duration::from_millis(100), states.recv())
+        .await
+        .is_err());
+    playback.step().await.unwrap();
+    assert_eq!(states.try_recv().unwrap().0.completed_turn, 3);
+    assert!(states.try_recv().is_err());
+    cancel_tx.send(true).unwrap();
+    assert_eq!(task.await.unwrap(), Ok(RunEnd::Cancelled));
+    for path in paths {
+        assert_reaped(&path);
+    }
+}
+
+#[tokio::test]
+async fn step_and_pause_acknowledgements_wait_for_complete_publication() {
+    let directory = TestDirectory::new();
+    let mut config = RunnerConfig::local(&root());
+    config.bot_paths = [
+        directory.example("basic_bot", "a"),
+        directory.example("strategic_bot", "b"),
+    ];
+    let paths = config.bot_paths.clone();
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let (playback, controls) = playback_channel(true);
+    let publish_started = Arc::new(Notify::new());
+    let release_publish = Arc::new(Notify::new());
+    let published_turn = Arc::new(AtomicU64::new(0));
+    let started = publish_started.clone();
+    let release = release_publish.clone();
+    let turn = published_turn.clone();
+    let task = tokio::spawn(run_match_controlled(
+        config,
+        cancel_rx,
+        no_delay(),
+        move |state| {
+            let started = started.clone();
+            let release = release.clone();
+            let turn = turn.clone();
+            async move {
+                started.notify_one();
+                release.notified().await;
+                turn.store(u64::from(state.completed_turn), Ordering::Relaxed);
+            }
+        },
+        controls,
+    ));
+    let step_control = playback.clone();
+    let mut step = tokio::spawn(async move { step_control.step().await });
+    timeout(Duration::from_secs(3), publish_started.notified())
+        .await
+        .unwrap();
+    let pause_control = playback.clone();
+    let mut pause = tokio::spawn(async move { pause_control.pause().await });
+    assert!(timeout(Duration::from_millis(30), &mut step).await.is_err());
+    assert!(timeout(Duration::from_millis(30), &mut pause)
+        .await
+        .is_err());
+    assert_eq!(published_turn.load(Ordering::Relaxed), 0);
+    release_publish.notify_one();
+    step.await.unwrap().unwrap();
+    pause.await.unwrap().unwrap();
+    assert_eq!(published_turn.load(Ordering::Relaxed), 1);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(published_turn.load(Ordering::Relaxed), 1);
+    cancel_tx.send(true).unwrap();
+    assert_eq!(task.await.unwrap(), Ok(RunEnd::Cancelled));
+    for path in paths {
+        assert_reaped(&path);
+    }
+}
+
+#[tokio::test]
+async fn cancelling_paused_match_reaps_bots_and_fresh_paused_match_resets_state() {
+    let directory = TestDirectory::new();
+    let mut config = RunnerConfig::local(&root());
+    config.bot_paths = [
+        directory.fixture("stateful", "a"),
+        directory.fixture("stateful", "b"),
+    ];
+    let paths = config.bot_paths.clone();
+    let mut previous_pids = None;
+    for _ in 0..2 {
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (playback, controls) = playback_channel(true);
+        let (published, mut states) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_match_controlled(
+            config.clone(),
+            cancel_rx,
+            no_delay(),
+            move |state| {
+                published.send(state).unwrap();
+                ready(())
+            },
+            controls,
+        ));
+        for expected_turn in 1..=3 {
+            playback.step().await.unwrap();
+            assert_eq!(states.try_recv().unwrap().completed_turn, expected_turn);
+        }
+        let current_pids = [pid(&paths[0]), pid(&paths[1])];
+        if let Some(previous) = previous_pids {
+            assert_ne!(current_pids, previous);
+        }
+        previous_pids = Some(current_pids);
+        cancel_tx.send(true).unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap(),
+            Ok(RunEnd::Cancelled)
+        );
+        assert!(playback.resume().await.is_err());
+        for path in &paths {
+            assert_reaped(path);
+        }
+    }
+}
+
+#[tokio::test]
+async fn pause_during_automatic_turn_acknowledges_only_after_publish_and_stops_next_turn() {
+    let directory = TestDirectory::new();
+    let mut config = RunnerConfig::local(&root());
+    config.bot_paths = [
+        directory.example("basic_bot", "a"),
+        directory.example("strategic_bot", "b"),
+    ];
+    let paths = config.bot_paths.clone();
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let (playback, controls) = playback_channel(false);
+    let publish_started = Arc::new(Notify::new());
+    let release_publish = Arc::new(Notify::new());
+    let published_turn = Arc::new(AtomicU64::new(0));
+    let started = publish_started.clone();
+    let release = release_publish.clone();
+    let turn = published_turn.clone();
+    let task = tokio::spawn(run_match_controlled(
+        config,
+        cancel_rx,
+        no_delay(),
+        move |state| {
+            let started = started.clone();
+            let release = release.clone();
+            let turn = turn.clone();
+            async move {
+                started.notify_one();
+                release.notified().await;
+                turn.store(u64::from(state.completed_turn), Ordering::Relaxed);
+            }
+        },
+        controls,
+    ));
+    timeout(Duration::from_secs(3), publish_started.notified())
+        .await
+        .unwrap();
+    let pause_control = playback.clone();
+    let mut pause = tokio::spawn(async move { pause_control.pause().await });
+    assert!(timeout(Duration::from_millis(30), &mut pause)
+        .await
+        .is_err());
+    assert_eq!(published_turn.load(Ordering::Relaxed), 0);
+    release_publish.notify_one();
+    pause.await.unwrap().unwrap();
+    assert_eq!(published_turn.load(Ordering::Relaxed), 1);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(published_turn.load(Ordering::Relaxed), 1);
+    cancel_tx.send(true).unwrap();
+    assert_eq!(task.await.unwrap(), Ok(RunEnd::Cancelled));
+    for path in paths {
+        assert_reaped(&path);
+    }
+}
+
+#[tokio::test]
+async fn manual_steps_finish_real_example_match_and_reap_both_bots() {
+    let directory = TestDirectory::new();
+    let mut config = RunnerConfig::local(&root());
+    config.bot_paths = [
+        directory.example("basic_bot", "a"),
+        directory.example("strategic_bot", "b"),
+    ];
+    let paths = config.bot_paths.clone();
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    let (playback, controls) = playback_channel(true);
+    let (published, mut states) = mpsc::unbounded_channel();
+    let task = tokio::spawn(run_match_controlled(
+        config,
+        cancel_rx,
+        no_delay(),
+        move |state| {
+            published.send(state).unwrap();
+            ready(())
+        },
+        controls,
+    ));
+    let final_state = timeout(Duration::from_secs(15), async {
+        for expected_turn in 1..=MAX_TURNS {
+            playback.step().await.unwrap();
+            let state = states
+                .try_recv()
+                .expect("step did not publish a complete turn");
+            assert_eq!(state.completed_turn, expected_turn);
+            state.validate().unwrap();
+            assert!(states.try_recv().is_err());
+            if state.outcome.is_some() {
+                return state;
+            }
+        }
+        panic!("manual steps did not terminate by the last legal turn");
+    })
+    .await
+    .unwrap();
+    assert_eq!(task.await.unwrap(), Ok(RunEnd::Finished));
+    assert_eq!(final_state.scores.a + final_state.scores.b, 96);
+    assert!(playback.step().await.is_err());
+    for path in paths {
+        assert_reaped(&path);
+    }
 }

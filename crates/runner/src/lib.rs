@@ -16,9 +16,9 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout},
-    sync::{watch, Mutex},
+    sync::{mpsc, oneshot, watch, Mutex},
     task::JoinHandle,
-    time::{sleep, timeout},
+    time::{sleep_until, timeout, Instant},
 };
 
 #[derive(Clone, Debug)]
@@ -49,6 +49,102 @@ impl RunnerConfig {
 pub enum RunEnd {
     Finished,
     Cancelled,
+}
+
+#[derive(Clone)]
+pub struct PlaybackHandle {
+    commands: mpsc::Sender<PlaybackCommand>,
+}
+
+pub struct PlaybackReceiver {
+    commands: mpsc::Receiver<PlaybackCommand>,
+    paused: bool,
+}
+
+enum PlaybackAction {
+    Pause,
+    Resume,
+    Step,
+}
+
+struct PlaybackCommand {
+    action: PlaybackAction,
+    acknowledged: oneshot::Sender<Result<(), String>>,
+}
+
+/// Creates controls for one match. A paused match starts at turn zero without
+/// requesting actions from either bot until a step or resume command arrives.
+pub fn playback_channel(paused: bool) -> (PlaybackHandle, PlaybackReceiver) {
+    let (commands, receiver) = mpsc::channel(32);
+    (
+        PlaybackHandle { commands },
+        PlaybackReceiver {
+            commands: receiver,
+            paused,
+        },
+    )
+}
+
+impl PlaybackHandle {
+    async fn request(&self, action: PlaybackAction) -> Result<(), String> {
+        let (acknowledged, response) = oneshot::channel();
+        self.commands
+            .send(PlaybackCommand {
+                action,
+                acknowledged,
+            })
+            .await
+            .map_err(|_| "경기가 종료되어 관전 제어를 적용할 수 없습니다".to_owned())?;
+        response
+            .await
+            .map_err(|_| "경기가 종료되어 관전 제어를 적용할 수 없습니다".to_owned())?
+    }
+
+    /// Returns only at a fully published turn boundary. No new bot exchange can
+    /// start after this acknowledgement until resume or step is requested.
+    pub async fn pause(&self) -> Result<(), String> {
+        self.request(PlaybackAction::Pause).await
+    }
+
+    /// Enables automatic turns, beginning after the current display interval.
+    pub async fn resume(&self) -> Result<(), String> {
+        self.request(PlaybackAction::Resume).await
+    }
+
+    /// Publishes exactly one complete turn and remains paused. Running matches
+    /// reject this command so an automatic turn cannot be mistaken for a step.
+    pub async fn step(&self) -> Result<(), String> {
+        self.request(PlaybackAction::Step).await
+    }
+}
+
+fn apply_playback_command(
+    command: PlaybackCommand,
+    paused: &mut bool,
+    next_turn: &mut Instant,
+    delay_ms: &AtomicU64,
+) -> Option<oneshot::Sender<Result<(), String>>> {
+    match command.action {
+        PlaybackAction::Pause => {
+            *paused = true;
+            let _ = command.acknowledged.send(Ok(()));
+        }
+        PlaybackAction::Resume => {
+            if *paused {
+                *paused = false;
+                *next_turn =
+                    Instant::now() + Duration::from_millis(delay_ms.load(Ordering::Relaxed));
+            }
+            let _ = command.acknowledged.send(Ok(()));
+        }
+        PlaybackAction::Step if *paused => return Some(command.acknowledged),
+        PlaybackAction::Step => {
+            let _ = command
+                .acknowledged
+                .send(Err("한 턴 진행은 일시정지 상태에서만 가능합니다".to_owned()));
+        }
+    }
+    None
 }
 
 #[derive(Serialize)]
@@ -250,9 +346,26 @@ fn parse_actions(response: &[u8], expected_turn: u16) -> Result<Vec<Command>, St
 /// cleans up both processes before returning; callbacks must not hold I/O locks.
 pub async fn run_match<F, Fut>(
     config: RunnerConfig,
+    cancel: watch::Receiver<bool>,
+    delay_ms: Arc<AtomicU64>,
+    publish: F,
+) -> Result<RunEnd, String>
+where
+    F: FnMut(GameState) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let (_handle, controls) = playback_channel(false);
+    run_match_controlled(config, cancel, delay_ms, publish, controls).await
+}
+
+/// Runs a fresh match with turn-boundary playback controls. Bot processes remain
+/// alive while paused, and cancellation interrupts both a pause and display wait.
+pub async fn run_match_controlled<F, Fut>(
+    config: RunnerConfig,
     mut cancel: watch::Receiver<bool>,
     delay_ms: Arc<AtomicU64>,
     mut publish: F,
+    mut controls: PlaybackReceiver,
 ) -> Result<RunEnd, String>
 where
     F: FnMut(GameState) -> Fut,
@@ -271,9 +384,51 @@ where
     };
     let run: Result<RunEnd, String> = async {
         let mut state = GameState::new();
+        let mut paused = controls.paused;
+        let mut next_turn = Instant::now();
+        let mut step_acknowledged = None;
         loop {
             if *cancel.borrow() {
                 return Ok(RunEnd::Cancelled);
+            }
+            // Commands received during exchange or publish are applied at this
+            // boundary before the next automatic turn can start.
+            while step_acknowledged.is_none() {
+                match controls.commands.try_recv() {
+                    Ok(command) => {
+                        step_acknowledged = apply_playback_command(
+                            command,
+                            &mut paused,
+                            &mut next_turn,
+                            &delay_ms,
+                        );
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        return Ok(RunEnd::Cancelled);
+                    }
+                }
+            }
+            if step_acknowledged.is_none() {
+                tokio::select! {
+                    biased;
+                    _ = cancel.changed() => return Ok(RunEnd::Cancelled),
+                    command = controls.commands.recv() => {
+                        let Some(command) = command else {
+                            return Ok(RunEnd::Cancelled);
+                        };
+                        step_acknowledged = apply_playback_command(
+                            command,
+                            &mut paused,
+                            &mut next_turn,
+                            &delay_ms,
+                        );
+                        if step_acknowledged.is_none() {
+                            continue;
+                        }
+                    }
+                    _ = sleep_until(next_turn), if !paused => {}
+                }
             }
             let actions = tokio::select! {
                 biased;
@@ -282,14 +437,14 @@ where
             };
             state.step(&actions.0, &actions.1)?;
             publish(state.clone()).await;
+            if let Some(acknowledged) = step_acknowledged.take() {
+                let _ = acknowledged.send(Ok(()));
+            }
             if state.outcome.is_some() {
                 return Ok(RunEnd::Finished);
             }
-            tokio::select! {
-                biased;
-                _ = cancel.changed() => return Ok(RunEnd::Cancelled),
-                _ = sleep(Duration::from_millis(delay_ms.load(Ordering::Relaxed))) => {}
-            }
+            next_turn =
+                Instant::now() + Duration::from_millis(delay_ms.load(Ordering::Relaxed));
         }
     }
     .await;

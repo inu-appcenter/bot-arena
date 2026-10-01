@@ -6,7 +6,7 @@ use axum::{
     Json, Router,
 };
 use game_core::GameState;
-use runner::{run_match, RunEnd, RunnerConfig};
+use runner::{playback_channel, run_match_controlled, PlaybackHandle, RunEnd, RunnerConfig};
 use serde::{Deserialize, Serialize};
 use std::{
     path::Path,
@@ -45,12 +45,21 @@ pub struct Snapshot {
     pub state: GameState,
     pub error: Option<String>,
     pub turn_delay_ms: u64,
+    pub paused: bool,
     pub bot_names: BotNames,
 }
 
 struct ActiveMatch {
     cancel: watch::Sender<bool>,
+    playback: PlaybackHandle,
+    done: watch::Receiver<bool>,
     task: JoinHandle<()>,
+}
+
+enum PlaybackAction {
+    Pause,
+    Resume,
+    Step,
 }
 
 pub struct MatchManager {
@@ -71,6 +80,7 @@ impl MatchManager {
                 state: GameState::new(),
                 error: None,
                 turn_delay_ms: 150,
+                paused: false,
                 bot_names: BotNames {
                     a: "기본 수거 봇",
                     b: "분담 전략 봇",
@@ -87,9 +97,20 @@ impl MatchManager {
         self.snapshot.read().await.clone()
     }
 
-    async fn launch(&self, restart: bool, delay: u64) -> Result<Snapshot, ApiError> {
+    async fn launch(&self, restart: bool, delay: u64, paused: bool) -> Result<Snapshot, ApiError> {
         validate_delay(delay)?;
         let mut active = self.active.lock().await;
+        self.launch_locked(&mut active, restart, delay, paused)
+            .await
+    }
+
+    async fn launch_locked(
+        &self,
+        active: &mut Option<ActiveMatch>,
+        restart: bool,
+        delay: u64,
+        paused: bool,
+    ) -> Result<Snapshot, ApiError> {
         if !restart && self.snapshot.read().await.status == MatchStatus::Running {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
@@ -114,26 +135,36 @@ impl MatchManager {
             current.state = GameState::new();
             current.error = None;
             current.turn_delay_ms = delay;
+            current.paused = paused;
             current.clone()
         };
         let config = self.config.clone();
         let shared = self.snapshot.clone();
         let delay = self.delay_ms.clone();
         let (cancel, receiver) = watch::channel(false);
+        let (playback, playback_receiver) = playback_channel(paused);
+        let (done_sender, done) = watch::channel(false);
         let task = tokio::spawn(async move {
             let publish_to = shared.clone();
-            let result = run_match(config, receiver, delay, move |state| {
-                let shared = publish_to.clone();
-                async move {
-                    let mut current = shared.write().await;
-                    if current.match_id == Some(id) && current.status == MatchStatus::Running {
-                        current.state = state;
+            let result = run_match_controlled(
+                config,
+                receiver,
+                delay,
+                move |state| {
+                    let shared = publish_to.clone();
+                    async move {
+                        let mut current = shared.write().await;
+                        if current.match_id == Some(id) && current.status == MatchStatus::Running {
+                            current.state = state;
+                        }
                     }
-                }
-            })
+                },
+                playback_receiver,
+            )
             .await;
             let mut current = shared.write().await;
             if current.match_id != Some(id) {
+                let _ = done_sender.send(true);
                 return;
             }
             match result {
@@ -145,9 +176,61 @@ impl MatchManager {
                     current.error = Some(error);
                 }
             }
+            if current.status != MatchStatus::Running {
+                current.paused = false;
+            }
+            let _ = done_sender.send(true);
         });
-        *active = Some(ActiveMatch { cancel, task });
+        *active = Some(ActiveMatch {
+            cancel,
+            playback,
+            done,
+            task,
+        });
         Ok(initial)
+    }
+
+    async fn playback(&self, action: PlaybackAction) -> Result<Snapshot, ApiError> {
+        // Serialize requests so each acknowledged step advances exactly one turn.
+        let mut active = self.active.lock().await;
+        let current = self.snapshot().await;
+        if matches!(action, PlaybackAction::Step) && current.status == MatchStatus::Idle {
+            self.launch_locked(&mut active, false, current.turn_delay_ms, true)
+                .await?;
+        } else if current.status != MatchStatus::Running {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "진행 중인 경기가 없습니다. 새 경기를 시작하세요.",
+            ));
+        } else if matches!(action, PlaybackAction::Step) && !current.paused {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "먼저 일시정지한 뒤 한 턴씩 진행하세요.",
+            ));
+        }
+        let running = active
+            .as_mut()
+            .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "진행 중인 경기가 없습니다."))?;
+        let result = match action {
+            PlaybackAction::Pause => running.playback.pause().await,
+            PlaybackAction::Resume => running.playback.resume().await,
+            PlaybackAction::Step => running.playback.step().await,
+        };
+        // On the final step or an execution error, wait for cleanup and the
+        // terminal snapshot rather than exposing a finished board as running.
+        if result.is_err() || self.snapshot().await.state.outcome.is_some() {
+            while !*running.done.borrow() {
+                if running.done.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+        let mut current = self.snapshot.write().await;
+        if current.status == MatchStatus::Running {
+            result.map_err(|error| ApiError::new(StatusCode::CONFLICT, &error))?;
+            current.paused = !matches!(action, PlaybackAction::Resume);
+        }
+        Ok(current.clone())
     }
 
     async fn set_speed(&self, delay: u64) -> Result<Snapshot, ApiError> {
@@ -183,6 +266,8 @@ fn validate_delay(delay: u64) -> Result<(), ApiError> {
 #[serde(deny_unknown_fields)]
 struct MatchOptions {
     turn_delay_ms: u64,
+    #[serde(default)]
+    paused: bool,
 }
 
 #[derive(Debug)]
@@ -227,9 +312,10 @@ async fn start_match(
     State(manager): State<Arc<MatchManager>>,
     payload: Result<Json<MatchOptions>, JsonRejection>,
 ) -> Result<Json<Snapshot>, ApiError> {
+    let options = options(payload)?;
     Ok(Json(
         manager
-            .launch(false, options(payload)?.turn_delay_ms)
+            .launch(false, options.turn_delay_ms, options.paused)
             .await?,
     ))
 }
@@ -238,9 +324,10 @@ async fn restart_match(
     State(manager): State<Arc<MatchManager>>,
     payload: Result<Json<MatchOptions>, JsonRejection>,
 ) -> Result<Json<Snapshot>, ApiError> {
+    let options = options(payload)?;
     Ok(Json(
         manager
-            .launch(true, options(payload)?.turn_delay_ms)
+            .launch(true, options.turn_delay_ms, options.paused)
             .await?,
     ))
 }
@@ -254,12 +341,27 @@ async fn speed(
     ))
 }
 
+async fn pause(State(manager): State<Arc<MatchManager>>) -> Result<Json<Snapshot>, ApiError> {
+    Ok(Json(manager.playback(PlaybackAction::Pause).await?))
+}
+
+async fn resume(State(manager): State<Arc<MatchManager>>) -> Result<Json<Snapshot>, ApiError> {
+    Ok(Json(manager.playback(PlaybackAction::Resume).await?))
+}
+
+async fn step(State(manager): State<Arc<MatchManager>>) -> Result<Json<Snapshot>, ApiError> {
+    Ok(Json(manager.playback(PlaybackAction::Step).await?))
+}
+
 pub fn app(root: &Path, manager: Arc<MatchManager>) -> Router {
     Router::new()
         .route("/api/match", get(get_match))
         .route("/api/match/start", post(start_match))
         .route("/api/match/restart", post(restart_match))
         .route("/api/match/speed", post(speed))
+        .route("/api/match/pause", post(pause))
+        .route("/api/match/resume", post(resume))
+        .route("/api/match/step", post(step))
         .fallback_service(ServeDir::new(root.join("web")))
         .layer(SetResponseHeaderLayer::overriding(
             header::CACHE_CONTROL,
@@ -285,13 +387,13 @@ mod tests {
     #[tokio::test]
     async fn restart_replaces_processes_and_never_publishes_the_previous_match() {
         let manager = MatchManager::new(RunnerConfig::local(root()));
-        let first = manager.launch(false, 1_000).await.unwrap();
+        let first = manager.launch(false, 1_000, false).await.unwrap();
         assert_eq!(first.state.completed_turn, 0);
         assert_eq!(
-            manager.launch(false, 0).await.unwrap_err().status,
+            manager.launch(false, 0, false).await.unwrap_err().status,
             StatusCode::CONFLICT
         );
-        let second = manager.launch(true, 0).await.unwrap();
+        let second = manager.launch(true, 0, false).await.unwrap();
         assert_ne!(first.match_id, second.match_id);
         assert_eq!(second.state.completed_turn, 0);
         timeout(Duration::from_secs(15), async {
@@ -318,7 +420,7 @@ mod tests {
         let mut config = RunnerConfig::local(root());
         config.python = root().join("nonexistent-python");
         let manager = MatchManager::new(config);
-        manager.launch(false, 0).await.unwrap();
+        manager.launch(false, 0, false).await.unwrap();
         timeout(Duration::from_secs(2), async {
             loop {
                 let current = manager.snapshot().await;
@@ -333,6 +435,87 @@ mod tests {
         })
         .await
         .unwrap();
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn manual_steps_finish_with_the_same_result_as_automatic_play() {
+        let manual = MatchManager::new(RunnerConfig::local(root()));
+        let mut current = manual.playback(PlaybackAction::Step).await.unwrap();
+        let id = current.match_id;
+        assert_eq!(current.state.completed_turn, 1);
+        assert!(current.paused);
+        sleep(Duration::from_millis(180)).await;
+        assert_eq!(manual.snapshot().await.state, current.state);
+        while current.status == MatchStatus::Running {
+            let before = current.state.completed_turn;
+            current = manual.playback(PlaybackAction::Step).await.unwrap();
+            assert_eq!(current.state.completed_turn, before + 1);
+            assert_eq!(current.match_id, id);
+            current.state.validate().unwrap();
+        }
+        assert_eq!(current.status, MatchStatus::Finished);
+        assert!(!current.paused);
+        assert_eq!(
+            manual
+                .playback(PlaybackAction::Step)
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::CONFLICT
+        );
+        let automatic = MatchManager::new(RunnerConfig::local(root()));
+        automatic.launch(false, 0, false).await.unwrap();
+        timeout(Duration::from_secs(5), async {
+            while automatic.snapshot().await.status == MatchStatus::Running {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(automatic.snapshot().await.state, current.state);
+        manual.shutdown().await;
+        automatic.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn paused_restart_and_one_second_resume_preserve_turn_boundaries() {
+        let manager = MatchManager::new(RunnerConfig::local(root()));
+        let first = manager.playback(PlaybackAction::Step).await.unwrap();
+        let reset = manager.launch(true, 1_000, true).await.unwrap();
+        assert_ne!(reset.match_id, first.match_id);
+        assert!(reset.paused);
+        assert_eq!(reset.state.completed_turn, 0);
+        sleep(Duration::from_millis(150)).await;
+        assert_eq!(manager.snapshot().await.state.completed_turn, 0);
+        manager.playback(PlaybackAction::Resume).await.unwrap();
+        assert_eq!(
+            manager
+                .playback(PlaybackAction::Step)
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::CONFLICT
+        );
+        sleep(Duration::from_millis(700)).await;
+        assert_eq!(manager.snapshot().await.state.completed_turn, 0);
+        timeout(Duration::from_secs(2), async {
+            while manager.snapshot().await.state.completed_turn == 0 {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let paused = manager.playback(PlaybackAction::Pause).await.unwrap();
+        assert!(paused.paused);
+        sleep(Duration::from_millis(1_150)).await;
+        assert_eq!(manager.snapshot().await.state, paused.state);
+        let stepped = manager.playback(PlaybackAction::Step).await.unwrap();
+        assert_eq!(
+            stepped.state.completed_turn,
+            paused.state.completed_turn + 1
+        );
+        assert!(stepped.paused);
         manager.shutdown().await;
     }
 }
