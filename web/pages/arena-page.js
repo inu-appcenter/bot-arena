@@ -36,6 +36,9 @@ class ArenaPage extends HTMLElement {
     this._onStart = event => this.mutate("start", event.detail.turnDelay);
     this._onRestart = event => this.mutate("restart", event.detail.turnDelay);
     this._onSpeed = event => this.mutate("speed", event.detail.turnDelay);
+    this._onPause = () => this.mutate("pause");
+    this._onResume = () => this.mutate("resume");
+    this._onStep = () => this.mutate("step");
   }
 
   connectedCallback() {
@@ -44,6 +47,9 @@ class ArenaPage extends HTMLElement {
     this.addEventListener("match-start", this._onStart);
     this.addEventListener("match-restart", this._onRestart);
     this.addEventListener("match-speed", this._onSpeed);
+    this.addEventListener("match-pause", this._onPause);
+    this.addEventListener("match-resume", this._onResume);
+    this.addEventListener("match-step", this._onStep);
     const epoch = this.invalidate();
     this.poll(epoch);
   }
@@ -52,6 +58,9 @@ class ArenaPage extends HTMLElement {
     this.removeEventListener("match-start", this._onStart);
     this.removeEventListener("match-restart", this._onRestart);
     this.removeEventListener("match-speed", this._onSpeed);
+    this.removeEventListener("match-pause", this._onPause);
+    this.removeEventListener("match-resume", this._onResume);
+    this.removeEventListener("match-step", this._onStep);
     this.invalidate();
   }
 
@@ -93,8 +102,10 @@ class ArenaPage extends HTMLElement {
     this.controls.pending = true;
     this._controller = new AbortController();
     try {
+      const body = ["start", "restart", "speed"].includes(action) ? { turn_delay_ms: turnDelay } : undefined;
+      if (action === "restart") body.paused = Boolean(this._snapshot?.paused);
       const snapshot = await requestSnapshot(`/api/match/${action}`, {
-        method: "POST", body: { turn_delay_ms: turnDelay }, signal: this._controller.signal,
+        method: "POST", body, signal: this._controller.signal,
       });
       if (this.current(epoch)) { this.applySnapshot(snapshot, serial); this.showConnectionError(""); }
     } catch (error) {
@@ -121,8 +132,9 @@ class ArenaPage extends HTMLElement {
     this.roster.state = snapshot.state;
     this.result.snapshot = snapshot;
     const status = this.root.querySelector(".match-state");
-    status.dataset.status = snapshot.status;
-    status.querySelector("span").textContent = { idle: "시작 대기", running: "경기 진행 중", finished: "경기 종료", failed: "실행 오류" }[snapshot.status];
+    const paused = snapshot.status === "running" && snapshot.paused;
+    status.dataset.status = paused ? "paused" : snapshot.status;
+    status.querySelector("span").textContent = paused ? "경기 일시정지" : { idle: "시작 대기", running: "경기 진행 중", finished: "경기 종료", failed: "실행 오류" }[snapshot.status];
     this.root.querySelector(".match-id").textContent = snapshot.match_id == null ? "LOCAL MATCH" : `MATCH ${String(snapshot.match_id).padStart(3, "0")}`;
   }
 

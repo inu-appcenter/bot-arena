@@ -19,6 +19,7 @@ h1 { font-size: 31px; letter-spacing: -.07em; line-height: 1.35; margin: 13px 0 
 .match-state { display: flex; align-items: center; gap: 7px; background: #e9ece2; color: #76816e; padding: 8px 12px; border-radius: 30px; font-size: 10px; white-space: nowrap; }
 .match-state i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .match-state[data-status="running"] { background: #e1eddf; color: var(--team-a); }
+.match-state[data-status="paused"] { background: #f1eadb; color: #8b754e; }
 .match-state[data-status="finished"] { background: #dceadb; color: #47754b; }
 .match-state[data-status="failed"] { background: #f8e9dd; color: #b16b45; }
 .match-id { font: 9px var(--mono); letter-spacing: .06em; color: #98a18e; }
