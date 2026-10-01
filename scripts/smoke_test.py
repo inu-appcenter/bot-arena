@@ -28,10 +28,10 @@ def check_state(state):
     assert total == 96, state
 
 
-def request(base, path, payload=None, expected=200):
+def request(base, path, payload=None, expected=200, method=None):
     headers = {"Content-Type": "application/json"}
     data = None if payload is None else json.dumps(payload).encode()
-    req = Request(base + path, data=data, headers=headers)
+    req = Request(base + path, data=data, headers=headers, method=method)
     try:
         response = urlopen(req, timeout=5)
     except HTTPError as error:
@@ -104,7 +104,34 @@ def main():
         for path in ("/pages/arena-page.js", "/styles/tokens.css"):
             with urlopen(base + path, timeout=5) as response:
                 assert response.status == 200
-        first = request(base, "/api/match/start", {"turn_delay_ms": 1000})
+        stepped = request(base, "/api/match/step", method="POST")
+        assert stepped["paused"] and stepped["state"]["completed_turn"] == 1
+        time.sleep(0.2)
+        assert request(base, "/api/match")["state"] == stepped["state"]
+        stepped = request(base, "/api/match/step", method="POST")
+        assert stepped["paused"] and stepped["state"]["completed_turn"] == 2
+        request(base, "/api/match/speed", {"turn_delay_ms": 1000})
+        resumed_at = time.monotonic()
+        resumed = request(base, "/api/match/resume", method="POST")
+        assert not resumed["paused"]
+        request(base, "/api/match/step", expected=409, method="POST")
+        time.sleep(0.4)
+        assert request(base, "/api/match")["state"]["completed_turn"] == 2
+        deadline = time.monotonic() + 3
+        while request(base, "/api/match")["state"]["completed_turn"] == 2:
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+        assert time.monotonic() - resumed_at >= 0.9, "1 second playback advanced too early"
+        paused = request(base, "/api/match/pause", method="POST")
+        assert paused["paused"]
+        time.sleep(0.15)
+        assert request(base, "/api/match")["state"] == paused["state"]
+        reset = request(base, "/api/match/restart", {"turn_delay_ms": 1000, "paused": True})
+        assert reset["paused"] and reset["state"] == initial["state"]
+        time.sleep(0.15)
+        assert request(base, "/api/match")["state"]["completed_turn"] == 0
+        print("HTTP 수동 첫 턴·반복 한 턴·일시정지·1초/턴·수동 재시작 확인 완료")
+        first = request(base, "/api/match/restart", {"turn_delay_ms": 1000})
         request(base, "/api/match/start", {"turn_delay_ms": 0}, expected=409)
         request(base, "/api/match/restart", {"turn_delay_ms": 2001}, expected=400)
         second = request(base, "/api/match/restart", {"turn_delay_ms": 1000})
@@ -124,6 +151,7 @@ def main():
         assert state["scores"]["A"] > 0 and state["scores"]["B"] > 0
         assert state["outcome"] is not None
         assert state["completed_turn"] == 200 or sum(state["scores"].values()) == 96
+        request(base, "/api/match/step", expected=409, method="POST")
         print(f"HTTP 경기 완료: {state['completed_turn']}턴, 점수 {state['scores']}, {state['outcome']}")
         # Server shutdown must cancel a live match, not just an already finished task.
         request(base, "/api/match/restart", {"turn_delay_ms": 1000})
