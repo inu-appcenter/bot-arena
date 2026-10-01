@@ -16,6 +16,8 @@ cargo run -p server --locked
 
 [http://127.0.0.1:3000](http://127.0.0.1:3000)을 열고 **경기 시작**을 누른다. 서버가 두 Python 프로세스를 실행하며, 관전 속도를 바꾸거나 진행 중 **새 경기로 재시작**할 수 있다. 종료 시 최종 점수와 승리 팀 또는 무승부가 표시된다. 서버는 `Ctrl+C`로 종료한다.
 
+관전 속도에서 **1초/턴**을 선택하면 약 1초 간격으로 자동 진행한다. **일시정지**를 누르면 진행 중인 턴의 판정을 마친 뒤 멈추며, **한 턴 진행**을 누를 때마다 양 팀의 행동을 한 번씩 처리하고 다시 멈춘다. 초기 대기 화면에서도 **한 턴 진행**으로 첫 턴부터 수동 관전할 수 있다. **자동 진행**으로 돌아가면 선택한 간격 후 다음 턴부터 이어서 진행한다. 일시정지 상태에서 재시작하면 0턴으로 초기화한 뒤 멈춰 있다.
+
 Cargo가 PATH에 없지만 rustup으로 설치되어 있다면 `~/.cargo/bin/cargo run -p server --locked`를 사용할 수 있다. Python 실행 파일 이름이 다르면 다음처럼 지정한다.
 
 ```sh
@@ -60,8 +62,11 @@ A팀 반납 구역은 `x=0` 전체, B팀은 `x=14` 전체다. 시작 로봇은 A
 | `POST /api/match/start` | 새 경기 시작. 진행 중이면 `409`. |
 | `POST /api/match/restart` | 이전 프로세스 종료·회수 후 새 경기 시작. |
 | `POST /api/match/speed` | 턴 간 표시 간격 변경. 이미 시작된 대기에는 다음 턴부터 반영될 수 있다. |
+| `POST /api/match/pause` | 현재 턴의 판정이 끝난 경계에서 일시정지하고 상태 반환. |
+| `POST /api/match/resume` | 선택한 표시 간격으로 자동 진행 재개. |
+| `POST /api/match/step` | 일시정지 중 정확히 한 턴 판정 후 상태 반환. 대기 상태에서는 새 수동 경기를 시작하고 첫 턴 판정. |
 
-POST 본문은 모두 `{"turn_delay_ms":150}`이다. 허용 범위는 0~2000ms이며 웹의 속도 선택은 450/150/40ms다. 잘못된 요청은 `400`과 `{"error":"설명"}`을 반환한다. 임의 코드나 실행 경로를 입력받는 API는 없다.
+시작·재시작·속도 변경 본문은 `{"turn_delay_ms":150}`이다. 시작·재시작에는 `"paused":true`를 추가해 0턴에서 대기할 수 있다. 허용 간격은 0~2000ms이며 웹의 속도 선택은 1000/450/150/40ms다. 일시정지·재개·한 턴 진행에는 본문이 없다. 자동 진행 중 한 턴 요청이나 종료된 경기의 한 턴 요청은 `409`, 잘못된 JSON·값은 `400`과 `{"error":"설명"}`을 반환한다. 임의 코드나 실행 경로를 입력받는 API는 없다.
 
 ```sh
 curl http://127.0.0.1:3000/api/match
@@ -69,7 +74,7 @@ curl -X POST http://127.0.0.1:3000/api/match/start \
   -H 'Content-Type: application/json' -d '{"turn_delay_ms":150}'
 ```
 
-스냅샷은 `match_id`, `status`, `state`, `error`, `turn_delay_ms`, `bot_names`를 포함한다. `status`는 `idle`·`running`·`finished`·`failed`이며 초기 상태에는 경기 ID가 없다. `state.completed_turn`은 완료된 판정 수로 0~200이다. 점수는 `state.scores.A/B`, 결과는 `state.outcome`에서 읽는다. 정상 종료 결과의 `winner:null`은 무승부이며 `reason`은 `all_delivered` 또는 `turn_limit`이다.
+스냅샷은 `match_id`, `status`, `state`, `error`, `turn_delay_ms`, `paused`, `bot_names`를 포함한다. `status`는 `idle`·`running`·`finished`·`failed`이며 초기 상태에는 경기 ID가 없다. 일시정지는 `status:running`과 `paused:true`로 표시한다. `state.completed_turn`은 완료된 판정 수로 0~200이다. 점수는 `state.scores.A/B`, 결과는 `state.outcome`에서 읽는다. 정상 종료 결과의 `winner:null`은 무승부이며 `reason`은 `all_delivered` 또는 `turn_limit`이다.
 
 ## 봇 JSON 계약
 
