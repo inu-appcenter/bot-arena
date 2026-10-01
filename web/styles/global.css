@@ -1,0 +1,4 @@
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; background: var(--page); color: var(--ink); }
+button, select { font: inherit; }
+noscript { display: block; margin: 2rem; padding: 1rem; border: 1px solid var(--line); background: var(--paper); }

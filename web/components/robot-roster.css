@@ -1,0 +1,19 @@
+@import url("/styles/component-base.css");
+section { border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper); padding: 24px; }
+.heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 21px; }
+h2 { font-size: 14px; margin: 0; letter-spacing: -.03em; }
+.eyebrow { color: var(--muted); font-size: 9px; }
+.team-a { color: var(--team-a); }
+.team-b { color: var(--team-b); }
+.group + .group { border-top: 1px solid var(--line); margin-top: 17px; padding-top: 17px; }
+.team-header { font-size: 9px; letter-spacing: .13em; font-weight: 700; margin-bottom: 11px; }
+.robot-row { display: flex; align-items: center; gap: 12px; margin: 10px 0; font: 11px var(--mono); }
+.robot-id { border-radius: 6px; background: var(--team-a-soft); min-width: 28px; height: 27px; display: grid; place-items: center; font-weight: 700; }
+.team-b .robot-id { background: var(--team-b-soft); }
+.position { color: var(--muted); min-width: 50px; }
+.cargo { display: flex; gap: 3px; margin-left: auto; }
+.cargo span { width: 9px; height: 9px; border: 1px solid #dbe0d4; border-radius: 2px; }
+.cargo .loaded { border-color: var(--resource); background: var(--resource); }
+.cargo-count { color: var(--muted); font-size: 10px; }
+.cargo-note { border-top: 1px solid var(--line); color: var(--muted); font-size: 9px; padding-top: 15px; margin-top: 20px; white-space: nowrap; }
+.cargo-dot { display: inline-block; width: 7px; height: 7px; background: var(--resource); border-radius: 2px; margin-right: 4px; }

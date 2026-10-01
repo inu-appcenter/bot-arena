@@ -1,0 +1,21 @@
+@import url("/styles/component-base.css");
+section { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); padding: 26px; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; color: var(--muted); }
+.control-icon { font-size: 20px; line-height: 1; }
+h2 { font-size: 19px; letter-spacing: -.06em; margin: 23px 0 10px; }
+.description { color: var(--muted); line-height: 1.7; font-size: 12px; margin: 0 0 23px; }
+button { width: 100%; min-height: 45px; border-radius: 11px; border: 0; font-size: 13px; font-weight: 650; transition: background .15s, transform .15s; }
+button:active:not(:disabled) { transform: translateY(1px); }
+.start { display: flex; justify-content: center; gap: 10px; align-items: center; color: #fffefa; background: var(--team-a); }
+.start:hover:not(:disabled) { background: #135d52; }
+.start:disabled { background: #dce6dd; color: #7b9183; }
+.play { font-size: 11px; }
+.restart { background: transparent; border: 1px solid var(--line); color: var(--ink); margin-top: 9px; }
+.restart:hover:not(:disabled) { background: var(--page); }
+.restart:disabled { color: #b1b9ad; }
+.restart span { font-size: 20px; vertical-align: -1px; margin-right: 7px; }
+.speed-row { display: flex; align-items: center; gap: 10px; margin-top: 23px; padding-top: 20px; border-top: 1px solid var(--line); }
+label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+select { min-width: 0; width: 100%; padding: 8px 6px; border: 1px solid var(--line); border-radius: 7px; color: var(--ink); background: var(--paper); font-size: 11px; }
+.speed-note { font-size: 10px; color: var(--muted); margin: 12px 0 0; line-height: 1.5; }
+@media (max-width: 860px) { section { height: 100%; } }

@@ -1,0 +1,18 @@
+:root {
+  color-scheme: light;
+  --page: #f3f4ee;
+  --paper: #fffefa;
+  --ink: #26382f;
+  --muted: #7b867d;
+  --line: #e3e7dd;
+  --team-a: #1c7467;
+  --team-a-soft: #e9f2eb;
+  --team-b: #ca7258;
+  --team-b-soft: #faf0e9;
+  --resource: #d5a63a;
+  --resource-soft: #fff4d4;
+  --font: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif;
+  --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --radius: 20px;
+  font-family: var(--font);
+}

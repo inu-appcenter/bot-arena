@@ -1,0 +1,11 @@
+@import url("/styles/component-base.css");
+section { display: flex; align-items: center; gap: 18px; background: var(--team-a-soft); border: 1px solid #c9d9c9; border-radius: 15px; padding: 21px 26px; }
+.result-symbol { width: 35px; height: 35px; border: 1px solid #adc9b4; border-radius: 50%; display: grid; place-items: center; color: var(--team-a); font-size: 18px; flex-shrink: 0; }
+h2 { margin: 0 0 6px; font-size: 16px; letter-spacing: -.035em; }
+p { margin: 0; color: #6d7f70; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.result-score { font: 600 17px var(--mono); margin-left: auto; white-space: nowrap; }
+.failed { background: #fff1e7; border-color: #eed1bc; }
+.failed .result-symbol { color: #a46242; border-color: #e0b99e; }
+.failed p { color: #94664c; }
+.failed .result-score { color: #a46242; font: 12px var(--font); }
+@media (max-width: 600px) { section { padding: 18px; gap: 12px; flex-wrap: wrap; } .message { flex: 1; min-width: 0; } .result-score { margin-left: 47px; flex: 0 0 calc(100% - 47px); } h2 { font-size: 14px; } }

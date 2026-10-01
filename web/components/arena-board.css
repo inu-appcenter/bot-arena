@@ -1,0 +1,25 @@
+@import url("/styles/component-base.css");
+section { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.board-header { display: flex; align-items: center; justify-content: space-between; padding: 25px 29px 13px; }
+.board-heading { display: flex; align-items: baseline; gap: 15px; }
+.eyebrow { color: var(--muted); font-size: 9px; }
+h2 { font-size: 15px; margin: 0; letter-spacing: -.03em; }
+.map-label { font: 10px var(--mono); color: var(--muted); }
+.map-label span { margin: 0 5px; }
+.canvas-wrap { max-width: 676px; margin: 0 auto; padding: 0 12px; }
+canvas { display: block; width: 100%; aspect-ratio: 1; }
+.legend { display: flex; align-items: center; gap: 23px; padding: 3px 31px 22px; color: var(--muted); font-size: 10px; }
+.legend > span { display: flex; align-items: center; gap: 7px; }
+.legend i { width: 10px; height: 10px; display: inline-block; border-radius: 3px; }
+.bank-a { background: var(--team-a-soft); border: 1px solid #a4bcab; }
+.bank-b { background: var(--team-b-soft); border: 1px solid #e1b5a3; }
+.resource { background: var(--resource-soft); border: 1px solid var(--resource); }
+.legend-coordinate { margin-left: auto; font-family: var(--mono); font-size: 9px; }
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--line); background: #fafbf5; }
+.stats > div { padding: 17px 29px; }
+.stats > div + div { border-left: 1px solid var(--line); }
+.stat-label { display: block; color: var(--muted); font-size: 10px; margin-bottom: 7px; }
+.stat-value { font: 500 24px var(--mono); letter-spacing: -.04em; }
+.unit { font-size: 10px; margin-left: 6px; color: var(--muted); }
+@media (max-width: 700px) { .board-header { padding: 22px 20px 10px; } .board-heading { gap: 8px; } .eyebrow { display: none; } .map-label { font-size: 9px; } .canvas-wrap { padding: 0 6px; } .legend { padding: 8px 20px 19px; gap: 17px; font-size: 9px; flex-wrap: wrap; } .legend-coordinate { display: none !important; } .stats > div { padding: 15px 19px; } .stat-label { font-size: 9px; } .stat-value { font-size: 22px; } .unit { font-size: 9px; } }
+@media (max-width: 400px) { .stats > div { padding: 13px 10px; } .legend { gap: 10px; padding-left: 13px; padding-right: 13px; } }
